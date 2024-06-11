@@ -1,44 +1,116 @@
 name: CI
+
 on:
-  create: # when tags are created
-  push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: 'Release name'
+        required: true
+      release_tag:
+        description: 'Release tag'
+        required: true
+
 jobs:
-  Build_Windows:
-    runs-on: windows-latest
+
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest]
+        configuration: [Release, Debug]
+
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v2
+      
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
       with:
-        fetch-depth: 0
-
-    - name: Install .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 7.0.x
-
+        dotnet-version: '6.0.x'
+      
     - name: Restore dependencies
-      run: dotnet restore src
+      run: dotnet restore src/ImGui.NET
 
-    - name: Build Project
-      run: dotnet build -c Release --no-restore src
-
-    - name: Build Packages
-      run: dotnet pack src/ImGui.NET -c Release --no-restore --no-build
-
+    - name: Build
+      run: dotnet build --no-restore src/ImGui.NET --configuration ${{ matrix.configuration }} --framework 'net6.0'
+      
     - name: List Packages
-      run: ls -l bin\Release\ImGui.NET\
+      run: ls -l bin\${{ matrix.configuration }}\ImGui.NET\net6.0\
 
-    - name: Validate Generated Code
-      if: startsWith(github.ref, 'refs/tags/')
-      shell: bash
-      run: |
-        echo "Running CodeGenerator"
-        bin/Release/CodeGenerator/net7.0/CodeGenerator.exe "src/ImGui.NET/Generated"
-        git status -s | findstr . && echo "ERROR: CodeGenerator is not executed, please execute it." && exit 1 || exit 0
+    - name: Upload artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: ${{ matrix.os }}-build-${{ matrix.configuration }}
+        path: bin\${{ matrix.configuration }}\ImGui.NET\net6.0\
 
-    - name: Publish to nuget.org
-      if: startsWith(github.ref, 'refs/tags/')
-      run: dotnet nuget push bin\Release\ImGui.NET\*.nupkg -s https://api.nuget.org/v3/index.json --api-key ${{secrets.NUGET_KEY}}
+  create_tag:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Create Tag
+      id: create_tag
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const tagName = '${{ github.event.inputs.release_tag }}';
+          const commitSha = '${{ github.sha }}';
+
+          await github.git.createRef({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            ref: `refs/tags/${tagName}`,
+            sha: commitSha
+          });
+
+  create_release:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.event.inputs.release_tag }}
+        release_name: ${{ github.event.inputs.release_name }}
+        draft: false
+        prerelease: false
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v2
+      with:
+        name: windows-latest-build-Release
+        path: ./windows-release
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v2
+      with:
+        name: windows-latest-build-Debug
+        path: ./windows-debug
+
+    - name: Upload Windows Release build artifact
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./windows-release
+        asset_name: windows-release
+        asset_content_type: application/zip
+
+    - name: Upload Windows Debug build artifact
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./windows-debug
+        asset_name: windows-debug
+        asset_content_type: application/zip
